@@ -1,0 +1,26 @@
+# runtime artifacts
+.venv/
+out/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/.pytest_cache/
+
+# webshell generator output (contains CREDENTIALS.txt — NEVER commit)
+shell/out/
+
+# lab artifacts (rebuilt by lab/setup.sh)
+lab/run/
+lab/modphp/
+lab/*.resp
+
+# local scan targets with real hosts
+lab/targets.txt
+
+# offsets cache is environment-specific
+out/offsets.env
+
+# OS noise
+.DS_Store
+
+out/version-check.json

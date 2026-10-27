@@ -1,0 +1,4 @@
+# php2shell runtime dependencies
+# (python3 >= 3.9; venv recommended — see install.sh)
+curl_cffi>=0.7        # TLS/JA3 impersonation (chrome/safari/edge/...) — without this the tool falls back to urllib (FAR easier to detect)
+bcrypt>=4.0           # password hashing for the webshell generator (shell/)
