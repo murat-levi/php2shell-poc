@@ -1,0 +1,57 @@
+# PHP2Shell Lab — Remote Testing
+#
+# Two profiles:
+#   1. lab        — display_errors=On, 8M, single worker (8M chain test)
+#   2. production — display_errors=Off, 128M, stock Apache (production chain test)
+#
+# The production profile replicates a real Debian/Ubuntu mod_php server:
+# stock apache2.conf (prefork defaults, MaxRequestWorkers=150) + the
+# php.ini-production values as a conf.d drop-in. No custom Apache config —
+# the pure chain's heap shaping is calibrated against the stock layout.
+#
+# Usage:
+#   docker compose up -d                                 # default: lab profile
+#   docker compose --profile production up -d            # + production
+#
+# Remote access: ports are bound to 0.0.0.0 (all interfaces)
+#   http://YOUR_IP:8088/  (lab)   http://YOUR_IP:8089/  (production)
+
+services:
+  lab:
+    image: php:8.4.26-apache
+    platform: linux/amd64
+    container_name: php2shell-lab
+    ports:
+      - "0.0.0.0:8088:80"
+    volumes:
+      - ./php.ini:/usr/local/etc/php/conf.d/zz-php2shell.ini:ro
+      - ./apache.conf:/etc/apache2/conf-enabled/zz-php2shell.conf:ro
+      - ./www:/var/www/html:ro
+      - ./out:/out
+    command:
+      - /bin/sh
+      - -c
+      - chown -R www-data:www-data /out 2>/dev/null || true; exec apache2-foreground
+    restart: unless-stopped
+    profiles: ["", "lab"]
+
+  production:
+    image: php:8.4.26-apache
+    platform: linux/amd64
+    container_name: php2shell-prod
+    ports:
+      - "0.0.0.0:8089:80"
+    volumes:
+      - ./php-production.ini:/usr/local/etc/php/conf.d/zz-php2shell.ini:ro
+      - ./www:/var/www/html:ro
+      - ./out:/out
+    # Load the FULL php.ini-production as the base (exactly what a distro
+    # PHP server does), then the zz- drop-in overrides only session/upload
+    # limits. Heap-shaping-relevant defaults (variables_order=GPCS,
+    # request_order=GP, zend.assertions=-1, ...) must match production.
+    command:
+      - /bin/sh
+      - -c
+      - cp -n /usr/local/etc/php/php.ini-production /usr/local/etc/php/php.ini; chown -R www-data:www-data /out 2>/dev/null || true; exec apache2-foreground
+    restart: unless-stopped
+    profiles: ["production"]
