@@ -178,7 +178,7 @@ def _run_exploits(candidates: list[dict], args) -> None:
                 log=(lambda m: print(f"     {m}", flush=True)),
                 seed=args.seed, fire=args.fire, gadget=args.gadget,
                 prop=args.prop, php=args.php, probes=args.probes,
-                oob=args.oob)
+                oob=args.oob, workers=getattr(args, "workers", 1))
         except RuntimeError as e:
             r["exploit"] = {"success": False, "error": str(e)}
             print(f"     failed: {e}")
@@ -402,6 +402,9 @@ def _add_exploit_flags(p):
                    help="write proof to /out/NAME on target then read it back")
     g.add_argument("--retries", type=int, default=3, help="retries per stage (default 3)")
     g.add_argument("--probes", type=int, default=20, help="pure chain: probe count (default 20)")
+    g.add_argument("--workers", type=int, default=1,
+                   help="target prefork MaxRequestWorkers; >1 pins workers-1 "
+                        "children so the chain hits one child (pure chain)")
     g.add_argument("--oob", default="", help="pure chain: OOB listener URL (blind mode)")
     g.add_argument("--seed", default="", help="mismatch chain: seed endpoint")
     g.add_argument("--fire", default="", help="mismatch chain: fire endpoint")

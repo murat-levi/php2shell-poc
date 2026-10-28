@@ -108,6 +108,19 @@ def build_argv(chain: str, opts: dict) -> list[str]:
             if v is not None and v != "":
                 argv.append(str(v))
 
+    def opt(flag, val):
+        # flag+value as a PAIR: skip both when the value is empty, so argparse
+        # never sees a bare flag waiting for an argument (e.g. `--proof --oob`).
+        if val is not None and val != "":
+            argv.append(flag)
+            argv.append(str(val))
+
+    # The runner's proof_file is a NAME for the lab /out/<name> mount pattern;
+    # the host-side path for that mount is lab/out/<name>.
+    def _proof_path():
+        pf = str(opts.get("proof_file") or "").strip()
+        return os.path.join("lab", "out", pf) if pf else ""
+
     if chain == "pure":
         a("--host", opts.get("host") or "127.0.0.1")
         a("--port", opts.get("port") or 8088)
@@ -115,20 +128,30 @@ def build_argv(chain: str, opts: dict) -> list[str]:
         a("--cmd", opts.get("cmd") or "id>/out/p1")
         a("--probes", opts.get("probes") or 20)
         a("--retries", opts.get("retries") or 3)
-        a("--proof", opts.get("proof") or "")
-        a("--oob", opts.get("oob") or "")
-        if opts.get("auto"):
+        a("--workers", opts.get("workers") or 1)
+        opt("--zif-off", opts.get("zif") or "")
+        opt("--dtor-off", opts.get("dtor") or "")
+        opt("--s-off", opts.get("htdata") or "")
+        oob = str(opts.get("oob") or "").strip()
+        proof = str(opts.get("proof") or "").strip() or _proof_path()
+        if oob:
+            opt("--oob", oob)
+        elif proof:
+            opt("--proof", proof)
+        # auto = fingerprint + pick known build offsets; use it unless the
+        # caller pinned offsets explicitly.
+        if opts.get("auto") or not opts.get("zif"):
             argv.append("--auto")
     elif chain == "remote":
         a("-u", opts.get("url"))
         a("--cmd", opts.get("cmd") or "id>/out/p1")
         a("--profile", opts.get("profile") or "bookworm")
         a("--attempts", opts.get("attempts") or 3)
-        a("--zif", opts.get("zif") or "")
-        a("--dtor", opts.get("dtor") or "")
-        a("--htdata", opts.get("htdata") or "")
-        a("--libphp", opts.get("libphp") or "")
-        a("--proof-file", opts.get("proof_file") or "")
+        opt("--zif", opts.get("zif") or "")
+        opt("--dtor", opts.get("dtor") or "")
+        opt("--htdata", opts.get("htdata") or "")
+        opt("--libphp", opts.get("libphp") or "")
+        opt("--proof-file", opts.get("proof") or _proof_path())
     elif chain == "local":
         a("--php", opts.get("php") or "php")
         a("--cmd", opts.get("cmd") or "id > /tmp/proof")

